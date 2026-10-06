@@ -5,7 +5,7 @@ module ActiveModel
         super
         @column              = options[:column].to_s
         valid_transitions    = options[:valid_transitions]
-        @when_validations    = options[:when_validations]
+        @when_validations    = options[:when_validations]&.to_h { |attribute, values| [attribute, [values].flatten] }
         @inclusive           = options[:inclusive]
         @allowed_transitions = {}
 
@@ -14,24 +14,14 @@ module ActiveModel
 
       def build_valid_transition_lookup(valid_transitions)
         valid_transitions.each do |transition|
-          [transition[:from]].flatten.each do |from|
-            [transition[:to]].flatten.each do |to|
-              requires_validation    = transition[:requires].present?
-              requires_when          = transition[:when].present?
-              @allowed_transitions[from] ||= []
-              next @allowed_transitions[from] << { to => { requires_validation: false } } unless requires_validation
+          requires = transition[:requires].present? &&
+                     transition[:requires].to_h { |key, value| [key, [value].flatten] }
 
-              @allowed_transitions[from] << {
-                to => {
-                  requires_validation: true,
-                  requires_when: requires_when,
-                  requires: transition[:requires].map do |key, value|
-                    {
-                      key => [value].flatten
-                    }
-                  end
-                }
-              }
+          [transition[:from]].flatten.each do |from|
+            to_lookup = (@allowed_transitions[from] ||= {})
+            [transition[:to]].flatten.each do |to|
+              # First matching definition wins, preserving the previous ordered-lookup behavior
+              to_lookup[to] ||= { requires_validation: !!requires, requires: requires }
             end
           end
         end
@@ -54,14 +44,11 @@ module ActiveModel
           return true
         end
 
-        transition = valid_transitions.find { |allowed_transition| allowed_transition[new_value] }
+        transition = valid_transitions[new_value]
         return invalid_transition_error(record, original_value, new_value) unless transition
+        return true unless transition[:requires_validation]
 
-        requires_validation = transition[new_value][:requires_validation]
-        return true unless requires_validation
-
-        requires_validation_requirements = transition[new_value][:requires]
-        validate_requires_field(requires_validation_requirements, original_value, new_value, record)
+        validate_requires_field(transition[:requires], original_value, new_value, record)
       end
 
       private
@@ -74,22 +61,17 @@ module ActiveModel
       end
 
       def when_condition_unmet?(record)
-        met_conditions = @when_validations.map do |attribute, when_values|
-                           current_value = record.read_attribute(attribute)
-                           [when_values].flatten.include?(current_value)
-                         end
-
-        !met_conditions.all?(true)
+        !@when_validations.all? do |attribute, when_values|
+          when_values.include?(record.read_attribute(attribute))
+        end
       end
 
       def validate_requires_field(all_requires, original_value, new_value, record)
-        all_requires.each do |requirement|
-          requirement.map do |attribute, allowed_values|
-            current_value = record.read_attribute(attribute)
-            next if allowed_values.include?(current_value)
+        all_requires.each do |attribute, allowed_values|
+          current_value = record.read_attribute(attribute)
+          next if allowed_values.include?(current_value)
 
-            add_requires_error(record, original_value, new_value, attribute, current_value)
-          end
+          add_requires_error(record, original_value, new_value, attribute, current_value)
         end
       end
 
